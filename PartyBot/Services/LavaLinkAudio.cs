@@ -8,13 +8,17 @@ using System.Threading.Tasks;
 using Victoria;
 using Victoria.EventArgs;
 using Victoria.Enums;
-using Victoria.Responses.Rest;
+using Victoria.Responses.Search;
+using Victoria.Filters;
+using System.Collections.Generic;
 
 namespace PartyBot.Services
 {
     public sealed class LavaLinkAudio
     {
         private readonly LavaNode _lavaNode;
+        // Yay C# 10 implicit new
+        private readonly Dictionary<IGuild, IEnumerable<LavaTrack>> _pendingSelects = new();
 
         public LavaLinkAudio(LavaNode lavaNode)
             => _lavaNode = lavaNode;
@@ -30,6 +34,8 @@ namespace PartyBot.Services
             {
                 return await EmbedHandler.CreateErrorEmbed("Music, Join", "You must be connected to a voice channel!");
             }
+
+            _pendingSelects.Add(guild, null);
 
             try
             {
@@ -61,38 +67,73 @@ namespace PartyBot.Services
 
             try
             {
+                // Clear pending choice.
+                _pendingSelects[guild] = null;
+
                 //Get the player for that guild.
                 var player = _lavaNode.GetPlayer(guild);
 
-                //Find The Youtube Track the User requested.
-                LavaTrack track;
-
                 var search = Uri.IsWellFormedUriString(query, UriKind.Absolute) ?
-                    await _lavaNode.SearchAsync(query)
+                    await _lavaNode.SearchAsync(SearchType.Direct, query)
                     : await _lavaNode.SearchYouTubeAsync(query);
 
-                //If we couldn't find anything, tell the user.
-                if (search.LoadStatus == LoadStatus.NoMatches)
+                Embed embed;
+
+                switch (search.Status)
                 {
-                    return await EmbedHandler.CreateErrorEmbed("Music", $"I wasn't able to find anything for {query}.");
+                    //If we couldn't find anything, tell the user.
+                    case SearchStatus.NoMatches:
+                        return await EmbedHandler.CreateErrorEmbed("Music", $"I wasn't able to find anything for {query}.");
+                    //Load a whole playlist.
+                    case SearchStatus.PlaylistLoaded:
+                    {
+                        var playlist = search.Playlist;
+                        await LoggingService.LogInformationAsync("Music", $"{playlist.Name} has been added to the queue");
+                        foreach (var t in search.Tracks)
+                        {
+                            player.Queue.Enqueue(t);
+                            await LoggingService.LogInformationAsync("Music", $"{t.Title} has been added to the music queue.");
+                        }
+                        embed = await EmbedHandler.CreateBasicEmbed("Music", $"{playlist.Name} has been added to the queue", Color.Blue);
+                        break;
+                    }
+                    case SearchStatus.TrackLoaded:
+                    {
+                        var t = search.Tracks.First();
+                        player.Queue.Enqueue(t);
+                        await LoggingService.LogInformationAsync("Music", $"{t.Title} has been added to the music queue.");
+                        embed = await EmbedHandler.CreateBasicEmbed("Music", $"{t.Title} has been added to queue.", Color.Blue);
+                        break;
+                    }
+                    case SearchStatus.SearchResult:
+                    {
+                        var tracks = search.Tracks.Take(5);
+                        _pendingSelects[guild] = tracks;
+                        return await EmbedHandler.CreateBasicEmbed("Music",
+                            $"Please select your preferred track\n{string.Join('\n', tracks.Select((t, index) => $"{index + 1}. [{t.Title}]({t.Url})"))}",
+                            Color.Blue);
+                    }
+                    case SearchStatus.LoadFailed:
+                    default:
+                    {
+                        await LoggingService.LogCriticalAsync("Music", search.Exception.ToString());
+                        return await EmbedHandler.CreateErrorEmbed("Music", "Cannot load music.");
+                    }
                 }
 
-                //Get the first track from the search results.
-                //TODO: Add a 1-5 list for the user to pick from. (Like Fredboat)
-                track = search.Tracks.FirstOrDefault();
-
-                //If the Bot is already playing music, or if it is paused but still has music in the playlist, Add the requested track to the queue.
-                if (player.Track != null && player.PlayerState is PlayerState.Playing || player.PlayerState is PlayerState.Paused)
+                //There's currently nothing to play. There should be a track to dequeue.
+                if (player.Track == null || player.PlayerState == PlayerState.Stopped)
                 {
-                    player.Queue.Enqueue(track);
-                    await LoggingService.LogInformationAsync("Music", $"{track.Title} has been added to the music queue.");
-                    return await EmbedHandler.CreateBasicEmbed("Music", $"{track.Title} has been added to queue.", Color.Blue);
+                    LavaTrack track;
+                    player.Queue.TryDequeue(out track);
+
+                    //Player was not playing anything, so lets play the requested track.
+                    await player.PlayAsync(track);
+                    await LoggingService.LogInformationAsync("Music", $"Bot Now Playing: {track.Title}\nUrl: {track.Url}");
+                    return await EmbedHandler.CreateBasicEmbed("Music", $"Now Playing: {track.Title}\nUrl: {track.Url}", Color.Blue);
                 }
 
-                //Player was not playing anything, so lets play the requested track.
-                await player.PlayAsync(track);
-                await LoggingService.LogInformationAsync("Music", $"Bot Now Playing: {track.Title}\nUrl: {track.Url}");
-                return await EmbedHandler.CreateBasicEmbed("Music", $"Now Playing: {track.Title}\nUrl: {track.Url}", Color.Blue);
+                return embed;
             }
 
             //If after all the checks we did, something still goes wrong. Tell the user about it so they can report it back to us.
@@ -121,6 +162,8 @@ namespace PartyBot.Services
                 //Leave the voice channel.
                 await _lavaNode.LeaveAsync(player.VoiceChannel);
 
+                _pendingSelects.Remove(guild);
+
                 await LoggingService.LogInformationAsync("Music", $"Bot has left.");
                 return await EmbedHandler.CreateBasicEmbed("Music", $"I've left. Thank you for playing moosik.", Color.Blue);
             }
@@ -133,10 +176,14 @@ namespace PartyBot.Services
 
         /*This is ran when a user uses the command List 
             Task Returns an Embed which is used in the command call. */
-        public async Task<Embed> ListAsync(IGuild guild)
+        public async Task<Embed> ListAsync(IGuild guild, int? page)
         {
+            const int tracksPerPage = 5;
             try
             {
+                page ??= 1;
+                --page;
+
                 /* Create a string builder we can use to format how we want our list to be displayed. */
                 var descriptionBuilder = new StringBuilder();
 
@@ -158,8 +205,8 @@ namespace PartyBot.Services
                         /* Now we know if we have something in the queue worth replying with, so we itterate through all the Tracks in the queue.
                          *  Next Add the Track title and the url however make use of Discords Markdown feature to display everything neatly.
                             This trackNum variable is used to display the number in which the song is in place. (Start at 2 because we're including the current song.*/
-                        var trackNum = 2;
-                        foreach (LavaTrack track in player.Queue)
+                        var trackNum = 2 + page * tracksPerPage;
+                        foreach (LavaTrack track in player.Queue.Skip((int)page * tracksPerPage).Take(5))
                         {
                             descriptionBuilder.Append($"{trackNum}: [{track.Title}]({track.Url}) - {track.Id}\n");
                             trackNum++;
@@ -169,7 +216,7 @@ namespace PartyBot.Services
                 }
                 else
                 {
-                    return await EmbedHandler.CreateErrorEmbed("Music, List", "Player doesn't seem to be playing anything right now. If this is an error, Please Contact Draxis.");
+                    return await EmbedHandler.CreateErrorEmbed("Music, List", "Player doesn't seem to be playing anything right now. If this is an error, Please Contact trungnt2910.");
                 }
             }
             catch (Exception ex)
@@ -295,8 +342,8 @@ namespace PartyBot.Services
                 var player = _lavaNode.GetPlayer(guild);
 
                 if (player.PlayerState is PlayerState.Paused)
-                { 
-                    await player.ResumeAsync(); 
+                {
+                    await player.ResumeAsync();
                 }
 
                 return $"**Resumed:** {player.Track.Title}";
@@ -309,7 +356,7 @@ namespace PartyBot.Services
 
         public async Task TrackEnded(TrackEndedEventArgs args)
         {
-            if (!args.Reason.ShouldPlayNext())
+            if (args.Reason != TrackEndReason.Finished)
             {
                 return;
             }
@@ -320,6 +367,8 @@ namespace PartyBot.Services
                 return;
             }
 
+            Console.WriteLine("Playing next track...");
+
             if (!(queueable is LavaTrack track))
             {
                 await args.Player.TextChannel.SendMessageAsync("Next item in queue is not a track.");
@@ -329,6 +378,67 @@ namespace PartyBot.Services
             await args.Player.PlayAsync(track);
             await args.Player.TextChannel.SendMessageAsync(
                 embed: await EmbedHandler.CreateBasicEmbed("Now Playing", $"[{track.Title}]({track.Url})", Color.Blue));
+        }
+
+        public async Task<Embed> SelectAsync(IGuild guild, int index)
+        {
+            if (!_pendingSelects.ContainsKey(guild) || _pendingSelects[guild] == null)
+            {
+                return await EmbedHandler.CreateErrorEmbed("Music", "There are no open selection dialogs!");
+            }
+
+            var list = _pendingSelects[guild].ToList();
+            _pendingSelects[guild] = null;
+
+            --index;
+            if (index >= list.Count || index < 0)
+            {
+                return await EmbedHandler.CreateErrorEmbed("Music", $"Invalid index: {index + 1}");
+            }
+
+            var player = _lavaNode.GetPlayer(guild);
+            var track = list[index];
+
+            if (player.Track == null || player.PlayerState == PlayerState.Stopped)
+            {
+                //Player was not playing anything, so lets play the requested track.
+                await player.PlayAsync(track);
+                await LoggingService.LogInformationAsync("Music", $"Bot Now Playing: {track.Title}\nUrl: {track.Url}");
+                return await EmbedHandler.CreateBasicEmbed("Music", $"Now Playing: {track.Title}\nUrl: {track.Url}", Color.Blue);
+            }
+
+            player.Queue.Enqueue(track);
+            await LoggingService.LogInformationAsync("Music", $"{track.Title} has been added to the queue.");
+            return await EmbedHandler.CreateBasicEmbed("Music", $"{track.Title} has been added to the queue.", Color.Blue);
+        }
+
+        public async Task<string> SetNightcoreAsync(IGuild guild, string enableString)
+        {
+            try
+            {
+                var enable = false;
+                if (!string.IsNullOrWhiteSpace(enableString))
+                {
+                    enable = bool.Parse(enableString);
+                }
+
+                var player = _lavaNode.GetPlayer(guild);
+
+                if (enable)
+                {
+                    await player.ApplyFilterAsync(new TimescaleFilter() { Pitch = 1.2999999523162842, Speed = 1.2999999523162842, Rate = 1 });
+                    return $"`nightcore` effect applied.";
+                }
+                else
+                {
+                    await player.ApplyFilterAsync(new TimescaleFilter() { Pitch = 1, Speed = 1, Rate = 1 });
+                    return $"`nightcore` effect removed.";
+                }
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
         }
     }
 }

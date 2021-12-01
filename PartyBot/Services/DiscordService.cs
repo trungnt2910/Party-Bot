@@ -34,6 +34,8 @@ namespace PartyBot.Services
         /* Initialize the Discord Client. */
         public async Task InitializeAsync()
         {
+            await PatchService.RunAsync();
+
             await InitializeGlobalDataAsync();
 
             await _client.LoginAsync(TokenType.Bot, GlobalData.Config.DiscordToken);

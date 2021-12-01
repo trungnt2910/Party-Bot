@@ -32,8 +32,9 @@ namespace PartyBot.Modules
             => await ReplyAsync(embed: await AudioService.StopAsync(Context.Guild));
 
         [Command("List")]
-        public async Task List()
-            => await ReplyAsync(embed: await AudioService.ListAsync(Context.Guild));
+        [Alias("Queue")]
+        public async Task List(int? page = 1)
+            => await ReplyAsync(embed: await AudioService.ListAsync(Context.Guild, page));
 
         [Command("Skip")]
         public async Task Skip()
@@ -50,5 +51,13 @@ namespace PartyBot.Modules
         [Command("Resume")]
         public async Task Resume()
             => await ReplyAsync(await AudioService.ResumeAsync(Context.Guild));
+
+        [Command("Select")]
+        public async Task Select(int index)
+            => await ReplyAsync(embed: await AudioService.SelectAsync(Context.Guild, index));
+
+        [Command("Nightcore")]
+        public async Task Nightcore([Remainder]string enable)
+            => await ReplyAsync(await AudioService.SetNightcoreAsync(Context.Guild, enable));
     }
 }
