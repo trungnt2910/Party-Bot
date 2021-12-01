@@ -63,5 +63,10 @@ namespace PartyBot.Modules
         [Command("Speed")]
         public async Task Speed(double? speed = null)
             => await ReplyAsync(embed: await AudioService.SetSpeedAsync(Context.Guild, speed));
+
+        [Command("Loop")]
+        [Alias("Repeat")]
+        public async Task Loop(string enable = null)
+            => await ReplyAsync(embed: await AudioService.SetLoopAsync(Context.Guild, enable));
     }
 }

@@ -364,13 +364,32 @@ namespace PartyBot.Services
                 return;
             }
 
+            var guild = args.Player.VoiceChannel.Guild;
+            // This should always exist.
+            var serverData = _serverData[guild]; 
+
+            switch (serverData.LoopType)
+            {
+                case LoopType.CurrentTrack:
+                {
+                    var oldTrack = args.Track;
+                    await args.Player.PlayAsync(oldTrack);
+                    await args.Player.TextChannel.SendMessageAsync(
+                        embed: await EmbedHandler.CreateBasicEmbed("Now Playing", $"[{oldTrack.Title}]({oldTrack.Url})", Color.Blue));
+                    return;
+                }
+                case LoopType.Queue:
+                {
+                    args.Player.Queue.Enqueue(args.Track);
+                }
+                break;
+            }
+
             if (!args.Player.Queue.TryDequeue(out var queueable))
             {
                 //await args.Player.TextChannel.SendMessageAsync("Playback Finished.");
                 return;
             }
-
-            Console.WriteLine("Playing next track...");
 
             if (!(queueable is LavaTrack track))
             {
@@ -467,6 +486,53 @@ namespace PartyBot.Services
                 await player.ApplyFilterAsync(new TimescaleFilter() { Pitch = 1, Speed = speed.Value, Rate = 1 });
                 serverData.Speed = speed.Value;
                 return await EmbedHandler.CreateBasicEmbed("Music", $"Speed set to: {speed.Value}", Color.Blue);
+            }
+            catch (Exception ex)
+            {
+                return await EmbedHandler.CreateErrorEmbed("Music", $"Failed to set music speed: {ex.Message}");
+            }
+        }
+
+        public async Task<Embed> SetLoopAsync(IGuild guild, string loopType)
+        {
+            try
+            {
+                if (!_serverData.ContainsKey(guild))
+                {
+                    return await EmbedHandler.CreateErrorEmbed("Music", "I'm not connected to a voice channel yet!");
+                }
+
+                var player = _lavaNode.GetPlayer(guild);
+                var serverData = _serverData[guild];
+
+                if (string.IsNullOrWhiteSpace(loopType))
+                {
+                    return await EmbedHandler.CreateBasicEmbed("Music", $"Current Loop Type: {serverData.LoopType}", Color.Blue);
+                }
+
+                loopType = loopType.Trim().ToLower();
+
+                switch (loopType)
+                {
+                    // annette-loop none | off
+                    case "none":
+                    case "off":
+                        serverData.LoopType = LoopType.None;
+                    break;
+                    case "track":
+                    case "currenttrack":
+                    case "current":
+                        serverData.LoopType = LoopType.CurrentTrack;
+                    break;
+                    case "queue":
+                    case "playlist":
+                        serverData.LoopType = LoopType.Queue;
+                    break;
+                    default:
+                        return await EmbedHandler.CreateErrorEmbed("Music", $"Invalid loop type: `{loopType}`");
+                }
+
+                return await EmbedHandler.CreateBasicEmbed("Music", $"Loop type set to: {serverData.LoopType}", Color.Blue);
             }
             catch (Exception ex)
             {
