@@ -59,5 +59,9 @@ namespace PartyBot.Modules
         [Command("Nightcore")]
         public async Task Nightcore([Remainder]string enable)
             => await ReplyAsync(await AudioService.SetNightcoreAsync(Context.Guild, enable));
+
+        [Command("Speed")]
+        public async Task Speed(double? speed = null)
+            => await ReplyAsync(embed: await AudioService.SetSpeedAsync(Context.Guild, speed));
     }
 }

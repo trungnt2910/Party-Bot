@@ -11,6 +11,7 @@ using Victoria.Enums;
 using Victoria.Responses.Search;
 using Victoria.Filters;
 using System.Collections.Generic;
+using PartyBot.DataStructs;
 
 namespace PartyBot.Services
 {
@@ -18,7 +19,7 @@ namespace PartyBot.Services
     {
         private readonly LavaNode _lavaNode;
         // Yay C# 10 implicit new
-        private readonly Dictionary<IGuild, IEnumerable<LavaTrack>> _pendingSelects = new();
+        private readonly Dictionary<IGuild, ServerData> _serverData = new();
 
         public LavaLinkAudio(LavaNode lavaNode)
             => _lavaNode = lavaNode;
@@ -35,7 +36,8 @@ namespace PartyBot.Services
                 return await EmbedHandler.CreateErrorEmbed("Music, Join", "You must be connected to a voice channel!");
             }
 
-            _pendingSelects.Add(guild, null);
+            // Init the Server Data when the bot joins a VC.
+            _serverData.Add(guild, new ServerData());
 
             try
             {
@@ -68,7 +70,7 @@ namespace PartyBot.Services
             try
             {
                 // Clear pending choice.
-                _pendingSelects[guild] = null;
+                _serverData[guild].PendingSelect = null;
 
                 //Get the player for that guild.
                 var player = _lavaNode.GetPlayer(guild);
@@ -108,7 +110,7 @@ namespace PartyBot.Services
                     case SearchStatus.SearchResult:
                     {
                         var tracks = search.Tracks.Take(5);
-                        _pendingSelects[guild] = tracks;
+                        _serverData[guild].PendingSelect = tracks;
                         return await EmbedHandler.CreateBasicEmbed("Music",
                             $"Please select your preferred track\n{string.Join('\n', tracks.Select((t, index) => $"{index + 1}. [{t.Title}]({t.Url})"))}",
                             Color.Blue);
@@ -162,7 +164,8 @@ namespace PartyBot.Services
                 //Leave the voice channel.
                 await _lavaNode.LeaveAsync(player.VoiceChannel);
 
-                _pendingSelects.Remove(guild);
+                // Remove the server data.
+                _serverData.Remove(guild);
 
                 await LoggingService.LogInformationAsync("Music", $"Bot has left.");
                 return await EmbedHandler.CreateBasicEmbed("Music", $"I've left. Thank you for playing moosik.", Color.Blue);
@@ -382,13 +385,13 @@ namespace PartyBot.Services
 
         public async Task<Embed> SelectAsync(IGuild guild, int index)
         {
-            if (!_pendingSelects.ContainsKey(guild) || _pendingSelects[guild] == null)
+            if (!_serverData.ContainsKey(guild) || _serverData[guild].PendingSelect == null)
             {
                 return await EmbedHandler.CreateErrorEmbed("Music", "There are no open selection dialogs!");
             }
 
-            var list = _pendingSelects[guild].ToList();
-            _pendingSelects[guild] = null;
+            var list = _serverData[guild].PendingSelect.ToList();
+            _serverData[guild].PendingSelect = null;
 
             --index;
             if (index >= list.Count || index < 0)
@@ -438,6 +441,36 @@ namespace PartyBot.Services
             catch (Exception ex)
             {
                 return ex.Message;
+            }
+        }
+
+        public async Task<Embed> SetSpeedAsync(IGuild guild, double? speed)
+        {
+            try
+            {
+                if (!_serverData.ContainsKey(guild))
+                {
+                    return await EmbedHandler.CreateErrorEmbed("Music", "I'm not connected to a voice channel yet!");
+                }
+
+                var player = _lavaNode.GetPlayer(guild);
+                var serverData = _serverData[guild];
+
+                // annette-speed
+                // return the current speed.
+                if (speed == null)
+                {
+                    return await EmbedHandler.CreateBasicEmbed("Music", $"Current Speed: {serverData.Speed}", Color.Blue);
+                }
+
+                // set the speed.
+                await player.ApplyFilterAsync(new TimescaleFilter() { Pitch = 1, Speed = speed.Value, Rate = 1 });
+                serverData.Speed = speed.Value;
+                return await EmbedHandler.CreateBasicEmbed("Music", $"Speed set to: {speed.Value}", Color.Blue);
+            }
+            catch (Exception ex)
+            {
+                return await EmbedHandler.CreateErrorEmbed("Music", $"Failed to set music speed: {ex.Message}");
             }
         }
     }
